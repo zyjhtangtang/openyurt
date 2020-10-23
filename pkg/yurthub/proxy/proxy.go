@@ -41,6 +41,7 @@ type yurtReverseProxy struct {
 	cacheMgr            cachemanager.CacheManager
 	maxRequestsInFlight int
 	stopCh              <-chan struct{}
+	nodeLabels          map[string]string
 }
 
 // NewYurtReverseProxyHandler creates a http handler for proxying
@@ -76,13 +77,17 @@ func NewYurtReverseProxyHandler(
 		cacheMgr:            cacheMgr,
 		maxRequestsInFlight: yurtHubCfg.MaxRequestInFlight,
 		stopCh:              stopCh,
+		nodeLabels:          yurtHubCfg.NodeLabels,
 	}
 
 	return yurtProxy.buildHandlerChain(yurtProxy), nil
 }
 
-func (p *yurtReverseProxy) buildHandlerChain(apiHandler http.Handler) http.Handler {
-	handler := util.WithRequestContentType(apiHandler)
+func (p *yurtReverseProxy) buildHandlerChain(handler http.Handler) http.Handler {
+	if len(p.nodeLabels) > 0 {
+		handler = util.WithRequestNodeLabel(handler, p.nodeLabels)
+	}
+	handler = util.WithRequestContentType(handler)
 	handler = util.WithCacheHeaderCheck(handler)
 	handler = util.WithRequestTrace(handler, p.maxRequestsInFlight)
 	handler = util.WithRequestClientComponent(handler)

@@ -17,12 +17,18 @@ limitations under the License.
 package util
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io/ioutil"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/alibaba/openyurt/pkg/yurthub/kubernetes/serializer"
 	"github.com/alibaba/openyurt/pkg/yurthub/util"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apiserver/pkg/endpoints/handlers/responsewriters"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/klog"
 )
@@ -180,5 +186,59 @@ func WithRequestTrace(handler http.Handler, limit int) http.Handler {
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, "Too many requests, please try again later.", http.StatusTooManyRequests)
 		}
+	})
+}
+
+func WithRequestNodeLabel(handler http.Handler, labels map[string]string) http.Handler {
+
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		ctx := req.Context()
+		info, _ := apirequest.RequestInfoFrom(ctx)
+		//if create node, add label.
+		if info.Resource == "nodes" && info.Verb == "create" {
+			klog.Infof("create node, add node label: %v", labels)
+			reqContentType, _ := util.ReqContentTypeFrom(ctx)
+			// "application/vnd.kubernetes.protobuf"
+			s, err := serializer.YurtHubSerializer.CreateSerializers(reqContentType, info.APIGroup, info.APIVersion)
+			if err != nil {
+				responsewriters.InternalError(w, req, fmt.Errorf("failed to create serializers: %v", err))
+				return
+			}
+
+			var buf bytes.Buffer
+			_, err = buf.ReadFrom(req.Body)
+			if err != nil {
+				responsewriters.InternalError(w, req, fmt.Errorf("Read from request body fail: %v", err))
+				return
+			}
+			obj, _, err := s.Decoder.Decode(buf.Bytes(), nil, nil)
+			if err != nil {
+				responsewriters.InternalError(w, req, fmt.Errorf("Fail decode request : %v", err))
+				return
+			}
+
+			node, ok := obj.(*v1.Node)
+			if !ok {
+				responsewriters.InternalError(w, req, fmt.Errorf("Create node fail: Assertion v1.node type fail."))
+				return
+			}
+
+			if node.Labels == nil {
+				node.Labels = labels
+			} else {
+				for key, value := range labels {
+					node.Labels[key] = value
+				}
+			}
+
+			newBuf := bytes.NewBuffer([]byte{})
+			if err := s.Encoder.Encode(node, newBuf); err != nil {
+				responsewriters.InternalError(w, req, fmt.Errorf("Encoder node fail: %v", err))
+				return
+			}
+			req.Body = ioutil.NopCloser(newBuf)
+			req.ContentLength = int64(newBuf.Len())
+		}
+		handler.ServeHTTP(w, req)
 	})
 }

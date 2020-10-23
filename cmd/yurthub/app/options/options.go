@@ -7,6 +7,7 @@ import (
 	"github.com/alibaba/openyurt/pkg/projectinfo"
 	"github.com/alibaba/openyurt/pkg/yurthub/util"
 	"github.com/spf13/pflag"
+	cliflag "k8s.io/component-base/cli/flag"
 )
 
 // YurtHubOptions is the main settings for the yurthub
@@ -24,6 +25,7 @@ type YurtHubOptions struct {
 	MaxRequestInFlight        int
 	JoinToken                 string
 	RootDir                   string
+	NodeLabels                map[string]string
 }
 
 // NewYurtHubOptions creates a new YurtHubOptions with a default config.
@@ -39,6 +41,7 @@ func NewYurtHubOptions() *YurtHubOptions {
 		HeartbeatTimeoutSeconds:   2,
 		MaxRequestInFlight:        250,
 		RootDir:                   filepath.Join("/var/lib/", projectinfo.GetHubName()),
+		NodeLabels:                make(map[string]string),
 	}
 
 	return o
@@ -80,4 +83,6 @@ func (o *YurtHubOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&o.MaxRequestInFlight, "max-requests-in-flight", o.MaxRequestInFlight, "the maximum number of parallel requests.")
 	fs.StringVar(&o.JoinToken, "join-token", o.JoinToken, "the Join token for bootstrapping hub agent when --cert-mgr-mode=hubself.")
 	fs.StringVar(&o.RootDir, "root-dir", o.RootDir, "directory path for managing hub agent files(pki, cache etc).")
+	bindableNodeLabels := cliflag.ConfigurationMap(o.NodeLabels)
+	fs.Var(&bindableNodeLabels, "node-labels", "Labels to add when registering the node in the cluster.  Labels must be key=value pairs separated by ','. Labels in the 'kubernetes.io' namespace can be allowed.")
 }

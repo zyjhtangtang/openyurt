@@ -26,6 +26,7 @@ type YurtHubConfiguration struct {
 	MaxRequestInFlight        int
 	JoinToken                 string
 	RootDir                   string
+	NodeLabels                map[string]string
 }
 
 // Complete converts *options.YurtHubOptions to *YurtHubConfiguration
@@ -49,6 +50,7 @@ func Complete(options *options.YurtHubOptions) (*YurtHubConfiguration, error) {
 		MaxRequestInFlight:        options.MaxRequestInFlight,
 		JoinToken:                 options.JoinToken,
 		RootDir:                   options.RootDir,
+		NodeLabels:                options.NodeLabels,
 	}
 
 	return cfg, nil
