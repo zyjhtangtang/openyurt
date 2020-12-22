@@ -157,6 +157,7 @@ spec:
   template:
     spec:
       hostPID: true
+      hostNetwork: true
       restartPolicy: OnFailure
       nodeName: {{.nodeName}}
       volumes:
