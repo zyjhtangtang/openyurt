@@ -128,9 +128,9 @@ setup_yurthub() {
         apiserver_addr=`cat $KUBELET_CONF | grep "server:" | awk  '{print $2}'`
     fi
 
-    log "setting up yurthub apiserver addr."
+    log "setting up yurthub apiserver addr ${apiserver_addr}."
     yurthub_yaml=$(echo "$yurthub_yaml" |
-    sed 's|__kubernetes_service_addr__|$apiserver_addr|')
+    sed "s|__kubernetes_service_addr__|${apiserver_addr}|")
 
     echo "$yurthub_yaml" > ${STATIC_POD_PATH}/yurt-hub.yaml
     log "create the ${STATIC_POD_PATH}/yurt-hub.yaml"
@@ -140,42 +140,18 @@ setup_yurthub() {
     do
         sleep 10
         # NOTE: context variables need to be replaced before exeuction
-        local podPhase
+        set +e
+        local hub_healthz
+        hub_healthz=$(curl http://127.0.0.1:10261/v1/healthz)
+        set -e
 
-        if [ "$provider" == "ack" ]; then
-            # the ack's apiserver doesn't support anonymous user visit, use 
-            # kubectl to check the pod status
-            podPhase=$(kubectl get po/yurt-hub-__node_name__\
-                --kubeconfig $KUBELET_CONF -n kube-system |
-                awk 'NR>1{print $3}') 
-        else
-            local podStat=$(curl -s \
-                https://__kubernetes_service_host__:__kubernetes_service_port_https__\
-/api/v1/namespaces/kube-system/pods/yurt-hub-__node_name__ \
---cert /var/lib/kubelet/pki/kubelet-client-current.pem \
---key /var/lib/kubelet/pki/kubelet-client-current.pem \
---cacert ${MINIKUBE_PKI_DIR}/ca.crt)
-            # yurt-hub pod is not found
-            if [ -n "$(echo "$podStat" | grep NotFound)" ]; then                 
-                retry=$((retry-1))
-	            log "yurt-hub-$NODE_NAME is not found, will retry $retry times"
-                continue
-            fi
-            # yurt-hub pod is created, let's check if the phase is "running"
-            podPhase=$(echo "$podStat" | 
-                grep '\"phase\":' | 
-                awk -F ':' '{print $2}' | 
-                tr -d '", ')
-        fi
-
-        
-        if [ "$podPhase" == "Running" ]; then 
-            log "yurt-hub-$NODE_NAME is $podPhase"
+        if [ "$hub_healthz" == "OK" ]; then
+            log "yurt-hub-$NODE_NAME healthz is OK"
             return 
         else 
             retry=$((retry-1))
             if [ $retry -ge 0 ]; then
-                log "yurt-hub-$NODE_NAME is $podPhase, will retry $retry times"
+                log "yurt-hub-$NODE_NAME is not ready, will retry $retry times"
             else 
                 error "yurt-hub-$NODE_NAME failed, after retry 5 times"
                 exit 1
