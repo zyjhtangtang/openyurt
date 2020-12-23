@@ -74,7 +74,6 @@ spec:
         k8s-app: yurt-tunnel-agent
     spec:
       nodeSelector:
-        beta.kubernetes.io/arch: amd64
         beta.kubernetes.io/os: linux
         {{.edgeWorkerLabel}}: "true"
       containers:
