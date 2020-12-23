@@ -41,6 +41,10 @@ spec:
     hostPath:
       path: /var/lib/kubelet/pki
       type: Directory
+  - name: hub-dir
+    hostPath:
+      path: /var/lib/yurt-hub
+      type: DirectoryOrCreate
   containers:
   - name: yurt-hub
     image: __yurthub_image__
@@ -52,6 +56,8 @@ spec:
       mountPath: /etc/kubernetes/pki
     - name: pem-dir
       mountPath: /var/lib/kubelet/pki
+    - name: hub-dir
+      mountPath: /var/lib/yurt-hub
     command:
     - yurthub
     - --v=2
