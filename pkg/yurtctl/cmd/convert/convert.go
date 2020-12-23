@@ -283,11 +283,16 @@ func (co *ConvertOptions) RunConvert() (err error) {
 
 	// 6. deploy yurt-hub and reset the kubelet service
 	klog.Infof("deploying the yurt-hub and resetting the kubelet service...")
+	joinToken, err := kubeutil.GetOrCreateJoinTokenString(co.clientSet)
+	if err != nil {
+		return err
+	}
 	if err = kubeutil.RunServantJobs(co.clientSet, map[string]string{
 		"provider":              string(co.Provider),
 		"action":                "convert",
 		"yurtctl_servant_image": co.YurctlServantImage,
 		"yurthub_image":         co.YurhubImage,
+		"joinToken":             joinToken,
 	}, edgeNodeNames); err != nil {
 		klog.Errorf("fail to run ServantJobs: %s", err)
 		return
