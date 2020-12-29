@@ -82,7 +82,6 @@ spec:
         args:
         - --node-name=$(NODE_NAME)
         image: {{.image}}
-        imagePullPolicy: Always
         name: yurt-tunnel-agent
         volumeMounts:
         - name: k8s-dir

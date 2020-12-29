@@ -48,7 +48,6 @@ spec:
   containers:
   - name: yurt-hub
     image: __yurthub_image__
-    imagePullPolicy: Always
     volumeMounts:
     - name: kubernetes
       mountPath: /etc/kubernetes
