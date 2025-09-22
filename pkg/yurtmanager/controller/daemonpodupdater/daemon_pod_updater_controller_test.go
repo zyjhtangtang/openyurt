@@ -32,8 +32,10 @@ import (
 	"k8s.io/apiserver/pkg/storage/names"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/openyurtio/openyurt/pkg/yurtmanager/controller/daemonpodupdater/config"
 	k8sutil "github.com/openyurtio/openyurt/pkg/yurtmanager/controller/daemonpodupdater/kubernetes"
 )
 
@@ -153,11 +155,11 @@ func newNode(name string, ready bool) *corev1.Node {
 // ----------------------------------------------------------------------------------------------------------------
 
 func setAutoUpdateAnnotation(ds *appsv1.DaemonSet) {
-	metav1.SetMetaDataAnnotation(&ds.ObjectMeta, UpdateAnnotation, AutoUpdate)
+	metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.AutoUpdate)
 }
 
 func setMaxUnavailableAnnotation(ds *appsv1.DaemonSet, v string) {
-	metav1.SetMetaDataAnnotation(&ds.ObjectMeta, MaxUnavailableAnnotation, v)
+	metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.MaxUnavailableAnnotation, v)
 }
 
 func setOnDelete(ds *appsv1.DaemonSet) {
@@ -286,7 +288,7 @@ func TestDaemonsetPodUpdater(t *testing.T) {
 		}
 		setMaxUnavailableAnnotation(ds, tcase.maxUnavailable)
 		switch tcase.strategy {
-		case AutoUpdate, AdvancedRollingUpdate:
+		case config.AutoUpdate, config.AdvancedRollingUpdate:
 			setAutoUpdateAnnotation(ds)
 		}
 
@@ -371,6 +373,1590 @@ func TestController_maxUnavailableCounts(t *testing.T) {
 			got, err := r.maxUnavailableCounts(ds, nodeToDaemonPods)
 			assert.Equal(t, nil, err)
 			assert.Equal(t, test.wantNum, got)
+		})
+	}
+}
+
+// TestReconcileDaemonpodupdater_Reconcile tests the Reconcile method with various scenarios
+func TestReconcileDaemonpodupdater_Reconcile(t *testing.T) {
+	tests := []struct {
+		name           string
+		daemonSet      *appsv1.DaemonSet
+		objects        []client.Object
+		expectations   map[string]bool
+		expectedError  bool
+		expectedResult reconcile.Result
+	}{
+		{
+			name:           "DaemonSet not found",
+			daemonSet:      nil,
+			objects:        []client.Object{},
+			expectations:   map[string]bool{},
+			expectedError:  false,
+			expectedResult: reconcile.Result{},
+		},
+		{
+			name: "DaemonSet with deletion timestamp",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				now := metav1.Now()
+				ds.DeletionTimestamp = &now
+				ds.Finalizers = []string{"test-finalizer"}
+				return ds
+			}(),
+			objects:        []client.Object{},
+			expectations:   map[string]bool{},
+			expectedError:  false,
+			expectedResult: reconcile.Result{},
+		},
+		{
+			name: "DaemonSet without update annotation",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				return ds
+			}(),
+			objects:        []client.Object{},
+			expectations:   map[string]bool{},
+			expectedError:  false,
+			expectedResult: reconcile.Result{},
+		},
+		{
+			name: "DaemonSet with OTA update strategy",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.OTAUpdate)
+				return ds
+			}(),
+			objects:        []client.Object{},
+			expectations:   map[string]bool{"default/test-ds": true},
+			expectedError:  false,
+			expectedResult: reconcile.Result{},
+		},
+		{
+			name: "DaemonSet with Auto update strategy",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.AutoUpdate)
+				return ds
+			}(),
+			objects:        []client.Object{},
+			expectations:   map[string]bool{"default/test-ds": true},
+			expectedError:  false,
+			expectedResult: reconcile.Result{},
+		},
+		{
+			name: "DaemonSet with AdvancedRollingUpdate strategy",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.AdvancedRollingUpdate)
+				return ds
+			}(),
+			objects:        []client.Object{},
+			expectations:   map[string]bool{"default/test-ds": true},
+			expectedError:  false,
+			expectedResult: reconcile.Result{},
+		},
+		{
+			name: "DaemonSet with unknown update strategy",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, "UnknownStrategy")
+				return ds
+			}(),
+			objects:        []client.Object{},
+			expectations:   map[string]bool{},
+			expectedError:  true,
+			expectedResult: reconcile.Result{},
+		},
+		{
+			name: "DaemonSet with expectations not satisfied",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.OTAUpdate)
+				return ds
+			}(),
+			objects:        []client.Object{},
+			expectations:   map[string]bool{"default/test-ds": false},
+			expectedError:  false,
+			expectedResult: reconcile.Result{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create fake client
+			var objects []client.Object
+			if tt.daemonSet != nil {
+				objects = append(objects, tt.daemonSet)
+			}
+			objects = append(objects, tt.objects...)
+			c := fakeclient.NewClientBuilder().WithObjects(objects...).Build()
+
+			// Create expectations
+			expectations := k8sutil.NewControllerExpectations()
+			for key, satisfied := range tt.expectations {
+				if !satisfied {
+					expectations.SetExpectations(key, 0, 1)
+				}
+			}
+
+			// Create reconciler
+			r := &ReconcileDaemonpodupdater{
+				Client:       c,
+				expectations: expectations,
+				podControl:   &k8sutil.FakePodControl{},
+			}
+
+			// Create request
+			req := reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Namespace: "default",
+					Name:      "test-ds",
+				},
+			}
+
+			// Execute reconcile
+			result, err := r.Reconcile(context.TODO(), req)
+
+			// Verify results
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, tt.expectedResult, result)
+		})
+	}
+}
+
+// TestReconcileDaemonpodupdater_Reconcile_OTAUpdate tests OTA update specific scenarios
+func TestReconcileDaemonpodupdater_Reconcile_OTAUpdate(t *testing.T) {
+	tests := []struct {
+		name          string
+		daemonSet     *appsv1.DaemonSet
+		pods          []*corev1.Pod
+		expectedError bool
+	}{
+		{
+			name: "OTA update with pods",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.OTAUpdate)
+				return ds
+			}(),
+			pods: func() []*corev1.Pod {
+				ds := newDaemonSet("test-ds", "test-image")
+				return []*corev1.Pod{
+					newPod("pod-1", "node-1", simpleDaemonSetLabel, ds),
+					newPod("pod-2", "node-2", simpleDaemonSetLabel, ds),
+				}
+			}(),
+			expectedError: false,
+		},
+		{
+			name: "OTA update with no pods",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.OTAUpdate)
+				return ds
+			}(),
+			pods:          []*corev1.Pod{},
+			expectedError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create objects for fake client
+			objects := []client.Object{tt.daemonSet}
+			for _, pod := range tt.pods {
+				objects = append(objects, pod)
+			}
+			c := fakeclient.NewClientBuilder().WithObjects(objects...).Build()
+
+			// Create reconciler
+			r := &ReconcileDaemonpodupdater{
+				Client:       c,
+				expectations: k8sutil.NewControllerExpectations(),
+				podControl:   &k8sutil.FakePodControl{},
+			}
+
+			// Create request
+			req := reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Namespace: tt.daemonSet.Namespace,
+					Name:      tt.daemonSet.Name,
+				},
+			}
+
+			// Execute reconcile
+			result, err := r.Reconcile(context.TODO(), req)
+
+			// Verify results
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, reconcile.Result{}, result)
+		})
+	}
+}
+
+// TestReconcileDaemonpodupdater_Reconcile_AdvancedRollingUpdate tests AdvancedRollingUpdate specific scenarios
+func TestReconcileDaemonpodupdater_Reconcile_AdvancedRollingUpdate(t *testing.T) {
+	tests := []struct {
+		name          string
+		daemonSet     *appsv1.DaemonSet
+		pods          []*corev1.Pod
+		nodes         []*corev1.Node
+		expectedError bool
+	}{
+		{
+			name: "AdvancedRollingUpdate with ready nodes and pods",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.AdvancedRollingUpdate)
+				setMaxUnavailableAnnotation(ds, "1")
+				return ds
+			}(),
+			pods: func() []*corev1.Pod {
+				ds := newDaemonSet("test-ds", "test-image")
+				return []*corev1.Pod{
+					newPod("pod-1", "node-1", simpleDaemonSetLabel, ds),
+					newPod("pod-2", "node-2", simpleDaemonSetLabel, ds),
+				}
+			}(),
+			nodes: []*corev1.Node{
+				newNode("node-1", true),
+				newNode("node-2", true),
+			},
+			expectedError: false,
+		},
+		{
+			name: "AdvancedRollingUpdate with not ready nodes",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.AdvancedRollingUpdate)
+				setMaxUnavailableAnnotation(ds, "1")
+				return ds
+			}(),
+			pods: func() []*corev1.Pod {
+				ds := newDaemonSet("test-ds", "test-image")
+				return []*corev1.Pod{
+					newPod("pod-1", "node-1", simpleDaemonSetLabel, ds),
+					newPod("pod-2", "node-2", simpleDaemonSetLabel, ds),
+				}
+			}(),
+			nodes: []*corev1.Node{
+				newNode("node-1", false),
+				newNode("node-2", true),
+			},
+			expectedError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create objects for fake client
+			objects := []client.Object{tt.daemonSet}
+			for _, pod := range tt.pods {
+				objects = append(objects, pod)
+			}
+			for _, node := range tt.nodes {
+				objects = append(objects, node)
+			}
+			c := fakeclient.NewClientBuilder().WithObjects(objects...).Build()
+
+			// Create reconciler
+			r := &ReconcileDaemonpodupdater{
+				Client:       c,
+				expectations: k8sutil.NewControllerExpectations(),
+				podControl:   &k8sutil.FakePodControl{},
+			}
+
+			// Create request
+			req := reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Namespace: tt.daemonSet.Namespace,
+					Name:      tt.daemonSet.Name,
+				},
+			}
+
+			// Execute reconcile
+			result, err := r.Reconcile(context.TODO(), req)
+
+			// Verify results
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, reconcile.Result{}, result)
+		})
+	}
+}
+
+// TestReconcileDaemonpodupdater_Reconcile_ErrorHandling tests error handling scenarios
+func TestReconcileDaemonpodupdater_Reconcile_ErrorHandling(t *testing.T) {
+	tests := []struct {
+		name          string
+		daemonSet     *appsv1.DaemonSet
+		objects       []client.Object
+		expectations  map[string]bool
+		expectedError bool
+	}{
+		{
+			name: "Get DaemonSet error",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				// Don't add to objects to simulate not found
+				return ds
+			}(),
+			objects:       []client.Object{},
+			expectations:  map[string]bool{},
+			expectedError: false, // Should handle NotFound gracefully
+		},
+		{
+			name: "OTA update with GetDaemonsetPods error",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.OTAUpdate)
+				return ds
+			}(),
+			objects:       []client.Object{},
+			expectations:  map[string]bool{"default/test-ds": true},
+			expectedError: false, // Should handle gracefully
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create fake client
+			objects := []client.Object{tt.daemonSet}
+			objects = append(objects, tt.objects...)
+			c := fakeclient.NewClientBuilder().WithObjects(objects...).Build()
+
+			// Create expectations
+			expectations := k8sutil.NewControllerExpectations()
+			for key, satisfied := range tt.expectations {
+				if !satisfied {
+					expectations.SetExpectations(key, 0, 1)
+				}
+			}
+
+			// Create reconciler
+			r := &ReconcileDaemonpodupdater{
+				Client:       c,
+				expectations: expectations,
+				podControl:   &k8sutil.FakePodControl{},
+			}
+
+			// Create request
+			req := reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Namespace: "default",
+					Name:      "test-ds",
+				},
+			}
+
+			// Execute reconcile
+			result, err := r.Reconcile(context.TODO(), req)
+
+			// Verify results
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, reconcile.Result{}, result)
+		})
+	}
+}
+
+// TestSetPodUpgradeCondition tests the SetPodUpgradeCondition method
+func TestSetPodUpgradeCondition(t *testing.T) {
+	tests := []struct {
+		name          string
+		daemonSet     *appsv1.DaemonSet
+		pod           *corev1.Pod
+		expectedError bool
+	}{
+		{
+			name: "Set pod upgrade condition - pod needs upgrade",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				ds.Status.CollisionCount = nil
+				return ds
+			}(),
+			pod: func() *corev1.Pod {
+				ds := newDaemonSet("test-ds", "test-image")
+				pod := newPod("test-pod", "node-1", simpleDaemonSetLabel, ds)
+				// Make pod not latest by changing the hash
+				pod.Labels[appsv1.DefaultDaemonSetUniqueLabelKey] = "old-hash"
+				return pod
+			}(),
+			expectedError: false,
+		},
+		{
+			name: "Set pod upgrade condition - pod is latest",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				ds.Status.CollisionCount = nil
+				return ds
+			}(),
+			pod: func() *corev1.Pod {
+				ds := newDaemonSet("test-ds", "test-image")
+				pod := newPod("test-pod", "node-1", simpleDaemonSetLabel, ds)
+				// Pod is already latest
+				return pod
+			}(),
+			expectedError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create objects for fake client
+			objects := []client.Object{tt.daemonSet, tt.pod}
+			c := fakeclient.NewClientBuilder().WithObjects(objects...).Build()
+
+			// Create reconciler
+			r := &ReconcileDaemonpodupdater{
+				Client:       c,
+				expectations: k8sutil.NewControllerExpectations(),
+				podControl:   &k8sutil.FakePodControl{},
+			}
+
+			// Compute hash for the DaemonSet
+			newHash := k8sutil.ComputeHash(&tt.daemonSet.Spec.Template, tt.daemonSet.Status.CollisionCount)
+
+			// Execute SetPodUpgradeCondition
+			err := r.SetPodUpgradeCondition(tt.daemonSet, tt.pod, newHash)
+
+			// Verify results
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestIsPodUpdatable tests the IsPodUpdatable function
+func TestIsPodUpdatable(t *testing.T) {
+	tests := []struct {
+		name     string
+		pod      *corev1.Pod
+		expected bool
+	}{
+		{
+			name: "Pod is updatable",
+			pod: func() *corev1.Pod {
+				pod := newPod("test-pod", "node-1", simpleDaemonSetLabel, nil)
+				pod.Status.Conditions = []corev1.PodCondition{
+					{
+						Type:   config.PodNeedUpgrade,
+						Status: corev1.ConditionTrue,
+					},
+				}
+				return pod
+			}(),
+			expected: true,
+		},
+		{
+			name: "Pod is not updatable",
+			pod: func() *corev1.Pod {
+				pod := newPod("test-pod", "node-1", simpleDaemonSetLabel, nil)
+				pod.Status.Conditions = []corev1.PodCondition{
+					{
+						Type:   config.PodNeedUpgrade,
+						Status: corev1.ConditionFalse,
+					},
+				}
+				return pod
+			}(),
+			expected: false,
+		},
+		{
+			name: "Pod has no upgrade condition",
+			pod: func() *corev1.Pod {
+				pod := newPod("test-pod", "node-1", simpleDaemonSetLabel, nil)
+				return pod
+			}(),
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := IsPodUpdatable(tt.pod)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestIsPodUpgradeConditionTrue tests the IsPodUpgradeConditionTrue function
+func TestIsPodUpgradeConditionTrue(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   corev1.PodStatus
+		expected bool
+	}{
+		{
+			name: "Pod upgrade condition is true",
+			status: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{
+					{
+						Type:   config.PodNeedUpgrade,
+						Status: corev1.ConditionTrue,
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "Pod upgrade condition is false",
+			status: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{
+					{
+						Type:   config.PodNeedUpgrade,
+						Status: corev1.ConditionFalse,
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "Pod has no upgrade condition",
+			status: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := IsPodUpgradeConditionTrue(tt.status)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestGetTemplateGeneration tests the GetTemplateGeneration function
+func TestGetTemplateGeneration(t *testing.T) {
+	tests := []struct {
+		name          string
+		daemonSet     *appsv1.DaemonSet
+		expectedGen   *int64
+		expectedError bool
+	}{
+		{
+			name: "DaemonSet with valid template generation",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				ds.Annotations = map[string]string{
+					appsv1.DeprecatedTemplateGeneration: "123",
+				}
+				return ds
+			}(),
+			expectedGen:   func() *int64 { v := int64(123); return &v }(),
+			expectedError: false,
+		},
+		{
+			name: "DaemonSet without template generation annotation",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				return ds
+			}(),
+			expectedGen:   nil,
+			expectedError: false,
+		},
+		{
+			name: "DaemonSet with invalid template generation",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				ds.Annotations = map[string]string{
+					appsv1.DeprecatedTemplateGeneration: "invalid",
+				}
+				return ds
+			}(),
+			expectedGen:   nil,
+			expectedError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gen, err := GetTemplateGeneration(tt.daemonSet)
+
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+
+			if tt.expectedGen == nil {
+				assert.Nil(t, gen)
+			} else {
+				assert.NotNil(t, gen)
+				assert.Equal(t, *tt.expectedGen, *gen)
+			}
+		})
+	}
+}
+
+// TestNodeReadyByName tests the NodeReadyByName function
+func TestNodeReadyByName(t *testing.T) {
+	tests := []struct {
+		name          string
+		node          *corev1.Node
+		expectedReady bool
+		expectedError bool
+	}{
+		{
+			name: "Node is ready",
+			node: func() *corev1.Node {
+				return newNode("test-node", true)
+			}(),
+			expectedReady: true,
+			expectedError: false,
+		},
+		{
+			name: "Node is not ready",
+			node: func() *corev1.Node {
+				return newNode("test-node", false)
+			}(),
+			expectedReady: false,
+			expectedError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create objects for fake client
+			objects := []client.Object{tt.node}
+			c := fakeclient.NewClientBuilder().WithObjects(objects...).Build()
+
+			// Execute NodeReadyByName
+			ready, err := NodeReadyByName(c, tt.node.Name)
+
+			// Verify results
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedReady, ready)
+			}
+		})
+	}
+}
+
+// TestNodeReady tests the NodeReady function
+func TestNodeReady(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   corev1.NodeStatus
+		expected bool
+	}{
+		{
+			name: "Node is ready",
+			status: corev1.NodeStatus{
+				Conditions: []corev1.NodeCondition{
+					{
+						Type:   corev1.NodeReady,
+						Status: corev1.ConditionTrue,
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "Node is not ready",
+			status: corev1.NodeStatus{
+				Conditions: []corev1.NodeCondition{
+					{
+						Type:   corev1.NodeReady,
+						Status: corev1.ConditionFalse,
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "Node has no ready condition",
+			status: corev1.NodeStatus{
+				Conditions: []corev1.NodeCondition{},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := NodeReady(&tt.status)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestCloneAndAddLabel tests the CloneAndAddLabel function
+func TestCloneAndAddLabel(t *testing.T) {
+	tests := []struct {
+		name     string
+		labels   map[string]string
+		key      string
+		value    string
+		expected map[string]string
+	}{
+		{
+			name: "Add label to existing labels",
+			labels: map[string]string{
+				"foo": "bar",
+			},
+			key:   "new-key",
+			value: "new-value",
+			expected: map[string]string{
+				"foo":     "bar",
+				"new-key": "new-value",
+			},
+		},
+		{
+			name:   "Add label to empty labels",
+			labels: map[string]string{},
+			key:    "new-key",
+			value:  "new-value",
+			expected: map[string]string{
+				"new-key": "new-value",
+			},
+		},
+		{
+			name: "Empty key returns original labels",
+			labels: map[string]string{
+				"foo": "bar",
+			},
+			key:   "",
+			value: "new-value",
+			expected: map[string]string{
+				"foo": "bar",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := CloneAndAddLabel(tt.labels, tt.key, tt.value)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestFindUpdatedPodsOnNode tests the findUpdatedPodsOnNode function
+func TestFindUpdatedPodsOnNode(t *testing.T) {
+	tests := []struct {
+		name      string
+		daemonSet *appsv1.DaemonSet
+		pods      []*corev1.Pod
+		newHash   string
+		expected  bool
+	}{
+		{
+			name: "Find updated pods on node - one new, one old",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				return ds
+			}(),
+			pods: func() []*corev1.Pod {
+				ds := newDaemonSet("test-ds", "test-image")
+				pod1 := newPod("pod-1", "node-1", simpleDaemonSetLabel, ds)
+				pod2 := newPod("pod-2", "node-1", simpleDaemonSetLabel, ds)
+				// Make pod2 old by changing its hash
+				pod2.Labels[appsv1.DefaultDaemonSetUniqueLabelKey] = "old-hash"
+				return []*corev1.Pod{pod1, pod2}
+			}(),
+			newHash:  "new-hash",
+			expected: false, // Multiple pods should return false
+		},
+		{
+			name: "Find updated pods on node - multiple new pods",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				return ds
+			}(),
+			pods: func() []*corev1.Pod {
+				ds := newDaemonSet("test-ds", "test-image")
+				pod1 := newPod("pod-1", "node-1", simpleDaemonSetLabel, ds)
+				pod2 := newPod("pod-2", "node-1", simpleDaemonSetLabel, ds)
+				return []*corev1.Pod{pod1, pod2}
+			}(),
+			newHash:  "new-hash",
+			expected: false, // Multiple new pods should return false
+		},
+		{
+			name: "Find updated pods on node - no pods",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				return ds
+			}(),
+			pods:     []*corev1.Pod{},
+			newHash:  "new-hash",
+			expected: true, // No pods should return true
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			newPod, oldPod, ok := findUpdatedPodsOnNode(tt.daemonSet, tt.pods, tt.newHash)
+			assert.Equal(t, tt.expected, ok)
+
+			// Only check for non-nil results if we expect success
+			if tt.expected && len(tt.pods) > 0 {
+				// If ok is true and we have pods, we should have valid results
+				assert.NotNil(t, newPod)
+				assert.NotNil(t, oldPod)
+			}
+		})
+	}
+}
+
+// TestGetTargetNodeName_EdgeCases tests edge cases for GetTargetNodeName
+func TestGetTargetNodeName_EdgeCases(t *testing.T) {
+	tests := []struct {
+		name          string
+		pod           *corev1.Pod
+		expectedError bool
+	}{
+		{
+			name: "Pod with empty node name and no affinity",
+			pod: func() *corev1.Pod {
+				pod := newPod("test-pod", "", simpleDaemonSetLabel, nil)
+				pod.Spec.Affinity = nil
+				return pod
+			}(),
+			expectedError: true,
+		},
+		{
+			name: "Pod with empty node name and no node affinity",
+			pod: func() *corev1.Pod {
+				pod := newPod("test-pod", "", simpleDaemonSetLabel, nil)
+				pod.Spec.Affinity = &corev1.Affinity{
+					NodeAffinity: nil,
+				}
+				return pod
+			}(),
+			expectedError: true,
+		},
+		{
+			name: "Pod with empty node name and no required during scheduling",
+			pod: func() *corev1.Pod {
+				pod := newPod("test-pod", "", simpleDaemonSetLabel, nil)
+				pod.Spec.Affinity = &corev1.Affinity{
+					NodeAffinity: &corev1.NodeAffinity{
+						RequiredDuringSchedulingIgnoredDuringExecution: nil,
+					},
+				}
+				return pod
+			}(),
+			expectedError: true,
+		},
+		{
+			name: "Pod with empty node name and no node selector terms",
+			pod: func() *corev1.Pod {
+				pod := newPod("test-pod", "", simpleDaemonSetLabel, nil)
+				pod.Spec.Affinity = &corev1.Affinity{
+					NodeAffinity: &corev1.NodeAffinity{
+						RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+							NodeSelectorTerms: []corev1.NodeSelectorTerm{},
+						},
+					},
+				}
+				return pod
+			}(),
+			expectedError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeName, err := GetTargetNodeName(tt.pod)
+
+			if tt.expectedError {
+				assert.Error(t, err)
+				assert.Empty(t, nodeName)
+			} else {
+				assert.NoError(t, err)
+				assert.NotEmpty(t, nodeName)
+			}
+		})
+	}
+}
+
+// TestAdvancedRollingUpdate_EdgeCases tests edge cases for advancedRollingUpdate
+func TestAdvancedRollingUpdate_EdgeCases(t *testing.T) {
+	tests := []struct {
+		name          string
+		daemonSet     *appsv1.DaemonSet
+		pods          []*corev1.Pod
+		nodes         []*corev1.Node
+		expectedError bool
+	}{
+		{
+			name: "AdvancedRollingUpdate with node ready check error",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.AdvancedRollingUpdate)
+				setMaxUnavailableAnnotation(ds, "1")
+				return ds
+			}(),
+			pods: func() []*corev1.Pod {
+				ds := newDaemonSet("test-ds", "test-image")
+				pod := newPod("pod-1", "nonexistent-node", simpleDaemonSetLabel, ds)
+				// Ensure pod has the same UID as DaemonSet
+				pod.OwnerReferences[0].UID = ds.UID
+				return []*corev1.Pod{pod}
+			}(),
+			nodes:         []*corev1.Node{},
+			expectedError: false, // The method might handle missing nodes gracefully
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create objects for fake client
+			objects := []client.Object{tt.daemonSet}
+			for _, pod := range tt.pods {
+				objects = append(objects, pod)
+			}
+			for _, node := range tt.nodes {
+				objects = append(objects, node)
+			}
+			c := fakeclient.NewClientBuilder().WithObjects(objects...).Build()
+
+			// Create reconciler
+			r := &ReconcileDaemonpodupdater{
+				Client:       c,
+				expectations: k8sutil.NewControllerExpectations(),
+				podControl:   &k8sutil.FakePodControl{},
+			}
+
+			// Execute advancedRollingUpdate
+			err := r.advancedRollingUpdate(tt.daemonSet)
+
+			// Verify results
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestReconcileDaemonpodupdater_deletePod(t *testing.T) {
+	tests := []struct {
+		name          string
+		pod           *corev1.Pod
+		daemonSet     *appsv1.DaemonSet
+		expectations  map[string]bool
+		expectedError bool
+	}{
+		{
+			name: "Delete pod with valid controller reference",
+			pod: func() *corev1.Pod {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.OTAUpdate)
+				pod := newPod("test-pod", "node-1", simpleDaemonSetLabel, ds)
+				return pod
+			}(),
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.OTAUpdate)
+				return ds
+			}(),
+			expectations:  map[string]bool{"default/test-ds": true},
+			expectedError: false,
+		},
+		{
+			name: "Delete pod with no controller reference",
+			pod: func() *corev1.Pod {
+				pod := newPod("test-pod", "node-1", simpleDaemonSetLabel, nil)
+				return pod
+			}(),
+			daemonSet:     nil,
+			expectations:  map[string]bool{},
+			expectedError: false,
+		},
+		{
+			name: "Delete pod with invalid controller reference",
+			pod: func() *corev1.Pod {
+				ds := newDaemonSet("test-ds", "test-image")
+				pod := newPod("test-pod", "node-1", simpleDaemonSetLabel, ds)
+				// Change the UID to make it invalid
+				pod.OwnerReferences[0].UID = "invalid-uid"
+				return pod
+			}(),
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.OTAUpdate)
+				return ds
+			}(),
+			expectations:  map[string]bool{},
+			expectedError: false,
+		},
+		{
+			name: "Delete pod with non-DaemonSet controller",
+			pod: func() *corev1.Pod {
+				pod := newPod("test-pod", "node-1", simpleDaemonSetLabel, nil)
+				pod.OwnerReferences = []metav1.OwnerReference{
+					{
+						APIVersion: "apps/v1",
+						Kind:       "Deployment",
+						Name:       "test-deployment",
+						UID:        "deployment-uid",
+					},
+				}
+				return pod
+			}(),
+			daemonSet:     nil,
+			expectations:  map[string]bool{},
+			expectedError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create objects for fake client
+			objects := []client.Object{}
+			if tt.daemonSet != nil {
+				objects = append(objects, tt.daemonSet)
+			}
+
+			c := fakeclient.NewClientBuilder().WithObjects(objects...).Build()
+
+			// Create expectations
+			expectations := k8sutil.NewControllerExpectations()
+			for key, satisfied := range tt.expectations {
+				if !satisfied {
+					expectations.SetExpectations(key, 0, 1)
+				}
+			}
+
+			// Create reconciler
+			r := &ReconcileDaemonpodupdater{
+				Client:       c,
+				expectations: expectations,
+				podControl:   &k8sutil.FakePodControl{},
+			}
+
+			// Create delete event
+			evt := event.TypedDeleteEvent[client.Object]{
+				Object: tt.pod,
+			}
+
+			// Execute deletePod
+			r.deletePod(context.TODO(), evt, nil)
+
+			// Verify expectations were updated if applicable
+			if len(tt.expectations) > 0 {
+				// Expectations should be satisfied after deletion
+				for key := range tt.expectations {
+					assert.True(t, expectations.SatisfiedExpectations(key))
+				}
+			}
+		})
+	}
+}
+
+// TestReconcileDaemonpodupdater_otaUpdate tests the otaUpdate method
+func TestReconcileDaemonpodupdater_otaUpdate(t *testing.T) {
+	tests := []struct {
+		name          string
+		daemonSet     *appsv1.DaemonSet
+		pods          []*corev1.Pod
+		expectedError bool
+	}{
+		{
+			name: "OTA update with pods",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.OTAUpdate)
+				return ds
+			}(),
+			pods: func() []*corev1.Pod {
+				ds := newDaemonSet("test-ds", "test-image")
+				return []*corev1.Pod{
+					newPod("pod-1", "node-1", simpleDaemonSetLabel, ds),
+					newPod("pod-2", "node-2", simpleDaemonSetLabel, ds),
+				}
+			}(),
+			expectedError: false,
+		},
+		{
+			name: "OTA update with no pods",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.OTAUpdate)
+				return ds
+			}(),
+			pods:          []*corev1.Pod{},
+			expectedError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create objects for fake client
+			objects := []client.Object{tt.daemonSet}
+			for _, pod := range tt.pods {
+				objects = append(objects, pod)
+			}
+			c := fakeclient.NewClientBuilder().WithObjects(objects...).Build()
+
+			// Create reconciler
+			r := &ReconcileDaemonpodupdater{
+				Client:       c,
+				expectations: k8sutil.NewControllerExpectations(),
+				podControl:   &k8sutil.FakePodControl{},
+			}
+
+			// Execute otaUpdate
+			err := r.otaUpdate(tt.daemonSet)
+
+			// Verify results
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestReconcileDaemonpodupdater_advancedRollingUpdate tests the advancedRollingUpdate method
+func TestReconcileDaemonpodupdater_advancedRollingUpdate(t *testing.T) {
+	tests := []struct {
+		name          string
+		daemonSet     *appsv1.DaemonSet
+		pods          []*corev1.Pod
+		nodes         []*corev1.Node
+		expectedError bool
+	}{
+		{
+			name: "AdvancedRollingUpdate with ready nodes",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.AdvancedRollingUpdate)
+				setMaxUnavailableAnnotation(ds, "1")
+				return ds
+			}(),
+			pods: func() []*corev1.Pod {
+				ds := newDaemonSet("test-ds", "test-image")
+				return []*corev1.Pod{
+					newPod("pod-1", "node-1", simpleDaemonSetLabel, ds),
+					newPod("pod-2", "node-2", simpleDaemonSetLabel, ds),
+				}
+			}(),
+			nodes: []*corev1.Node{
+				newNode("node-1", true),
+				newNode("node-2", true),
+			},
+			expectedError: false,
+		},
+		{
+			name: "AdvancedRollingUpdate with mixed ready/not-ready nodes",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.AdvancedRollingUpdate)
+				setMaxUnavailableAnnotation(ds, "1")
+				return ds
+			}(),
+			pods: func() []*corev1.Pod {
+				ds := newDaemonSet("test-ds", "test-image")
+				return []*corev1.Pod{
+					newPod("pod-1", "node-1", simpleDaemonSetLabel, ds),
+					newPod("pod-2", "node-2", simpleDaemonSetLabel, ds),
+				}
+			}(),
+			nodes: []*corev1.Node{
+				newNode("node-1", false),
+				newNode("node-2", true),
+			},
+			expectedError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create objects for fake client
+			objects := []client.Object{tt.daemonSet}
+			for _, pod := range tt.pods {
+				objects = append(objects, pod)
+			}
+			for _, node := range tt.nodes {
+				objects = append(objects, node)
+			}
+			c := fakeclient.NewClientBuilder().WithObjects(objects...).Build()
+
+			// Create reconciler
+			r := &ReconcileDaemonpodupdater{
+				Client:       c,
+				expectations: k8sutil.NewControllerExpectations(),
+				podControl:   &k8sutil.FakePodControl{},
+			}
+
+			// Execute advancedRollingUpdate
+			err := r.advancedRollingUpdate(tt.daemonSet)
+
+			// Verify results
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestReconcileDaemonpodupdater_getNodesToDaemonPods tests the getNodesToDaemonPods method
+func TestReconcileDaemonpodupdater_getNodesToDaemonPods(t *testing.T) {
+	tests := []struct {
+		name          string
+		daemonSet     *appsv1.DaemonSet
+		pods          []*corev1.Pod
+		expectedError bool
+		expectedNodes int
+	}{
+		{
+			name: "Get nodes to daemon pods with valid pods",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.AdvancedRollingUpdate)
+				return ds
+			}(),
+			pods: func() []*corev1.Pod {
+				// Create a shared DaemonSet for pods to ensure UID matches
+				ds := newDaemonSet("test-ds", "test-image")
+				pod1 := newPod("pod-1", "node-1", simpleDaemonSetLabel, ds)
+				pod2 := newPod("pod-2", "node-2", simpleDaemonSetLabel, ds)
+				return []*corev1.Pod{pod1, pod2}
+			}(),
+			expectedError: false,
+			expectedNodes: 2,
+		},
+		{
+			name: "Get nodes to daemon pods with no pods",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.AdvancedRollingUpdate)
+				return ds
+			}(),
+			pods:          []*corev1.Pod{},
+			expectedError: false,
+			expectedNodes: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create objects for fake client
+			objects := []client.Object{tt.daemonSet}
+
+			// For the first test case, ensure pods have the same UID as the DaemonSet
+			if tt.name == "Get nodes to daemon pods with valid pods" {
+				// Update pods to use the same UID as the DaemonSet
+				for _, pod := range tt.pods {
+					pod.OwnerReferences[0].UID = tt.daemonSet.UID
+					objects = append(objects, pod)
+				}
+			} else {
+				for _, pod := range tt.pods {
+					objects = append(objects, pod)
+				}
+			}
+
+			c := fakeclient.NewClientBuilder().WithObjects(objects...).Build()
+
+			// Create reconciler
+			r := &ReconcileDaemonpodupdater{
+				Client:       c,
+				expectations: k8sutil.NewControllerExpectations(),
+				podControl:   &k8sutil.FakePodControl{},
+			}
+
+			// Execute getNodesToDaemonPods
+			nodeToDaemonPods, err := r.getNodesToDaemonPods(tt.daemonSet)
+
+			// Verify results
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedNodes, len(nodeToDaemonPods))
+			}
+		})
+	}
+}
+
+// TestReconcileDaemonpodupdater_syncPodsOnNodes tests the syncPodsOnNodes method
+func TestReconcileDaemonpodupdater_syncPodsOnNodes(t *testing.T) {
+	tests := []struct {
+		name          string
+		daemonSet     *appsv1.DaemonSet
+		podsToDelete  []string
+		expectedError bool
+	}{
+		{
+			name: "Sync pods on nodes with pods to delete",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.AdvancedRollingUpdate)
+				return ds
+			}(),
+			podsToDelete:  []string{"pod-1", "pod-2"},
+			expectedError: false,
+		},
+		{
+			name: "Sync pods on nodes with no pods to delete",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.AdvancedRollingUpdate)
+				return ds
+			}(),
+			podsToDelete:  []string{},
+			expectedError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create objects for fake client
+			objects := []client.Object{tt.daemonSet}
+			c := fakeclient.NewClientBuilder().WithObjects(objects...).Build()
+
+			// Create reconciler
+			r := &ReconcileDaemonpodupdater{
+				Client:       c,
+				expectations: k8sutil.NewControllerExpectations(),
+				podControl:   &k8sutil.FakePodControl{},
+			}
+
+			// Execute syncPodsOnNodes
+			err := r.syncPodsOnNodes(tt.daemonSet, tt.podsToDelete)
+
+			// Verify results
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestReconcileDaemonpodupdater_resolveControllerRef tests the resolveControllerRef method
+func TestReconcileDaemonpodupdater_resolveControllerRef(t *testing.T) {
+	tests := []struct {
+		name          string
+		daemonSet     *appsv1.DaemonSet
+		controllerRef *metav1.OwnerReference
+		namespace     string
+		expectedDS    bool
+	}{
+		{
+			name: "Resolve valid controller reference",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				ds.UID = "test-uid"
+				return ds
+			}(),
+			controllerRef: &metav1.OwnerReference{
+				APIVersion: "apps/v1",
+				Kind:       "DaemonSet",
+				Name:       "test-ds",
+				UID:        "test-uid",
+			},
+			namespace:  "default",
+			expectedDS: true,
+		},
+		{
+			name: "Resolve invalid controller reference - wrong kind",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				return ds
+			}(),
+			controllerRef: &metav1.OwnerReference{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       "test-ds",
+				UID:        "test-uid",
+			},
+			namespace:  "default",
+			expectedDS: false,
+		},
+		{
+			name: "Resolve invalid controller reference - wrong UID",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				return ds
+			}(),
+			controllerRef: &metav1.OwnerReference{
+				APIVersion: "apps/v1",
+				Kind:       "DaemonSet",
+				Name:       "test-ds",
+				UID:        "wrong-uid",
+			},
+			namespace:  "default",
+			expectedDS: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create objects for fake client
+			objects := []client.Object{tt.daemonSet}
+			c := fakeclient.NewClientBuilder().WithObjects(objects...).Build()
+
+			// Create reconciler
+			r := &ReconcileDaemonpodupdater{
+				Client:       c,
+				expectations: k8sutil.NewControllerExpectations(),
+				podControl:   &k8sutil.FakePodControl{},
+			}
+
+			// Execute resolveControllerRef
+			ds := r.resolveControllerRef(tt.namespace, tt.controllerRef)
+
+			// Verify results
+			if tt.expectedDS {
+				assert.NotNil(t, ds)
+				assert.Equal(t, tt.daemonSet.Name, ds.Name)
+			} else {
+				assert.Nil(t, ds)
+			}
+		})
+	}
+}
+
+// TestReconcileDaemonpodupdater_Reconcile_Comprehensive tests comprehensive scenarios
+func TestReconcileDaemonpodupdater_Reconcile_Comprehensive(t *testing.T) {
+	tests := []struct {
+		name           string
+		daemonSet      *appsv1.DaemonSet
+		objects        []client.Object
+		expectations   map[string]bool
+		expectedError  bool
+		expectedResult reconcile.Result
+	}{
+		{
+			name: "Comprehensive test with OTA update and pods",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.OTAUpdate)
+				return ds
+			}(),
+			objects: func() []client.Object {
+				ds := newDaemonSet("test-ds", "test-image")
+				return []client.Object{
+					newPod("pod-1", "node-1", simpleDaemonSetLabel, ds),
+					newPod("pod-2", "node-2", simpleDaemonSetLabel, ds),
+					newNode("node-1", true),
+					newNode("node-2", true),
+				}
+			}(),
+			expectations:   map[string]bool{"default/test-ds": true},
+			expectedError:  false,
+			expectedResult: reconcile.Result{},
+		},
+		{
+			name: "Comprehensive test with AdvancedRollingUpdate and mixed nodes",
+			daemonSet: func() *appsv1.DaemonSet {
+				ds := newDaemonSet("test-ds", "test-image")
+				setOnDelete(ds)
+				metav1.SetMetaDataAnnotation(&ds.ObjectMeta, config.UpdateAnnotation, config.AdvancedRollingUpdate)
+				setMaxUnavailableAnnotation(ds, "1")
+				return ds
+			}(),
+			objects: func() []client.Object {
+				ds := newDaemonSet("test-ds", "test-image")
+				return []client.Object{
+					newPod("pod-1", "node-1", simpleDaemonSetLabel, ds),
+					newPod("pod-2", "node-2", simpleDaemonSetLabel, ds),
+					newNode("node-1", false),
+					newNode("node-2", true),
+				}
+			}(),
+			expectations:   map[string]bool{"default/test-ds": true},
+			expectedError:  false,
+			expectedResult: reconcile.Result{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create fake client
+			objects := []client.Object{tt.daemonSet}
+			objects = append(objects, tt.objects...)
+			c := fakeclient.NewClientBuilder().WithObjects(objects...).Build()
+
+			// Create expectations
+			expectations := k8sutil.NewControllerExpectations()
+			for key, satisfied := range tt.expectations {
+				if !satisfied {
+					expectations.SetExpectations(key, 0, 1)
+				}
+			}
+
+			// Create reconciler
+			r := &ReconcileDaemonpodupdater{
+				Client:       c,
+				expectations: expectations,
+				podControl:   &k8sutil.FakePodControl{},
+			}
+
+			// Create request
+			req := reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Namespace: "default",
+					Name:      "test-ds",
+				},
+			}
+
+			// Execute reconcile
+			result, err := r.Reconcile(context.TODO(), req)
+
+			// Verify results
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, tt.expectedResult, result)
 		})
 	}
 }

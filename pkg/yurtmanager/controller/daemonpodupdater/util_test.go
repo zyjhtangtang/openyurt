@@ -25,6 +25,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/openyurtio/openyurt/pkg/yurtmanager/controller/daemonpodupdater/config"
+	k8sutil "github.com/openyurtio/openyurt/pkg/yurtmanager/controller/daemonpodupdater/kubernetes"
 )
 
 func TestGetDaemonsetPods(t *testing.T) {
@@ -68,7 +71,8 @@ func TestIsDaemonsetPodLatest(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotLatest := IsDaemonsetPodLatest(tt.ds, tt.pod)
+			hash := k8sutil.ComputeHash(&tt.ds.Spec.Template, tt.ds.Status.CollisionCount)
+			gotLatest := IsDaemonsetPodLatest(tt.ds, tt.pod, hash)
 			assert.Equal(t, tt.wantLatest, gotLatest)
 		})
 	}
@@ -230,7 +234,7 @@ func TestGetPodUpgradeCondition(t *testing.T) {
 	pod1.Status = corev1.PodStatus{
 		Conditions: []corev1.PodCondition{
 			{
-				Type:   PodNeedUpgrade,
+				Type:   config.PodNeedUpgrade,
 				Status: corev1.ConditionTrue,
 			},
 		},
@@ -240,7 +244,7 @@ func TestGetPodUpgradeCondition(t *testing.T) {
 	pod2.Status = corev1.PodStatus{
 		Conditions: []corev1.PodCondition{
 			{
-				Type:   PodNeedUpgrade,
+				Type:   config.PodNeedUpgrade,
 				Status: corev1.ConditionFalse,
 			},
 		},
@@ -255,7 +259,7 @@ func TestGetPodUpgradeCondition(t *testing.T) {
 			name:   "pod1",
 			status: pod1.Status,
 			want: &corev1.PodCondition{
-				Type:   PodNeedUpgrade,
+				Type:   config.PodNeedUpgrade,
 				Status: corev1.ConditionTrue,
 			},
 		},
@@ -263,7 +267,7 @@ func TestGetPodUpgradeCondition(t *testing.T) {
 			name:   "pod2",
 			status: pod2.Status,
 			want: &corev1.PodCondition{
-				Type:   PodNeedUpgrade,
+				Type:   config.PodNeedUpgrade,
 				Status: corev1.ConditionFalse,
 			},
 		},
