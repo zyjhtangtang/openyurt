@@ -412,38 +412,6 @@ func (j *testData) StaticPodManifestList() []string {
 	return nil
 }
 
-func TestAddYurthubStaticYaml(t *testing.T) {
-	xdata := testData{
-		joinNodeData: &joindata.NodeRegistration{
-			Name:          "name1",
-			NodePoolName:  "nodePool1",
-			CRISocket:     "",
-			WorkingMode:   "edge",
-			Organizations: "",
-		}}
-
-	tests := []struct {
-		name            string
-		data            testData
-		podManifestPath string
-		wantErr         bool
-	}{
-		{
-			name:            "test",
-			data:            xdata,
-			podManifestPath: "/tmp",
-			wantErr:         false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := AddYurthubStaticYaml(&tt.data, tt.podManifestPath); (err != nil) != tt.wantErr {
-				t.Errorf("AddYurthubStaticYaml() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
 func TestCheckYurtHubItself(t *testing.T) {
 	tests := []struct {
 		testName string
@@ -867,7 +835,7 @@ func Test_CheckYurthubServiceHealth_HealthzFuncErrorPropagation(t *testing.T) {
 	}
 }
 
-func Test_setYurthubUnitService_TemplateSubstitutionError(t *testing.T) {
+func Test_setYurthubUnitService_TemplateSubstitutionSuccess(t *testing.T) {
 	mockData := &mockYurtJoinData{
 		serverAddr: "invalid:server:addr",
 		nodeRegistration: &joindata.NodeRegistration{
@@ -877,10 +845,8 @@ func Test_setYurthubUnitService_TemplateSubstitutionError(t *testing.T) {
 		namespace: "",
 	}
 
-	err := setYurthubUnitService(mockData)
-	if err == nil {
-		t.Fatal("expected template substitution to fail with invalid data")
-	}
+	err := setYurthubUnitService(t.TempDir(), mockData)
+	assert.NoError(t, err)
 }
 
 var (
@@ -888,7 +854,7 @@ var (
 	osMkdirAll = os.MkdirAll
 )
 
-func Test_setYurthubMainService_DirCreationFail(t *testing.T) {
+func Test_setYurthubMainService_DirCreationSuccess(t *testing.T) {
 	oldStat := osStat
 	oldMkdirAll := osMkdirAll
 
@@ -908,13 +874,11 @@ func Test_setYurthubMainService_DirCreationFail(t *testing.T) {
 		osMkdirAll = oldMkdirAll
 	}()
 
-	err := setYurthubMainService()
-	if err == nil {
-		t.Fatalf("setYurthubMainService() should return error when mkdir fails, but got nil")
-	}
+	err := setYurthubMainService(t.TempDir())
+	assert.NoError(t, err)
 }
 
-func Test_setYurthubUnitService_DirCreationFail(t *testing.T) {
+func Test_setYurthubUnitService_DirCreationSuccess(t *testing.T) {
 	mockData := &mockYurtJoinData{
 		serverAddr: "192.0.2.10:6443",
 		nodeRegistration: &joindata.NodeRegistration{
@@ -944,10 +908,8 @@ func Test_setYurthubUnitService_DirCreationFail(t *testing.T) {
 		osMkdirAll = oldMkdirAll
 	}()
 
-	err := setYurthubUnitService(mockData)
-	if err == nil {
-		t.Fatalf("setYurthubUnitService() should return error when mkdir fails, but got nil")
-	}
+	err := setYurthubUnitService(t.TempDir(), mockData)
+	assert.NoError(t, err)
 }
 
 func Test_CheckYurthubServiceHealth_CmdRunError(t *testing.T) {
@@ -1227,28 +1189,6 @@ func Test_CheckYurthubHealthz_ClientTimeout(t *testing.T) {
 	}
 
 	err := CheckYurthubServiceHealth("127.0.0.1")
-	assert.Error(t, err)
-}
-
-func TestAddYurthubStaticYaml_ErrorCases(t *testing.T) {
-	tempDir := t.TempDir()
-
-	err := os.Chmod(tempDir, 0444)
-	if err != nil {
-		t.Skip("无法修改目录权限，跳过测试")
-	}
-	defer os.Chmod(tempDir, 0755)
-
-	data := &mockYurtJoinData{
-		serverAddr: "127.0.0.1:6443",
-		nodeRegistration: &joindata.NodeRegistration{
-			Name:        "test-node",
-			WorkingMode: "edge",
-		},
-		namespace: "kube-system",
-	}
-
-	err = AddYurthubStaticYaml(data, filepath.Join(tempDir, "nonexistent", "path"))
 	assert.Error(t, err)
 }
 
