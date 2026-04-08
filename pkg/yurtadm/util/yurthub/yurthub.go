@@ -134,7 +134,7 @@ func setYurthubUnitService(hubUnitConfigDir string, data joindata.YurtJoinData) 
 		}
 	}
 
-	unitFile := hubUnitConfigDir + "/yurthub.service"
+	unitFile := hubUnitConfigDir + "/10-yurthub.conf"
 	if err := os.WriteFile(unitFile, []byte(unitContent), 0644); err != nil {
 		klog.Errorf("Write file %s fail: %v", unitFile, err)
 		return err
@@ -148,7 +148,7 @@ func CreateYurthubSystemdService(data joindata.YurtJoinData) error {
 		return err
 	}
 
-	if err := setYurthubUnitService("/etc/systemd/system", data); err != nil {
+	if err := setYurthubUnitService("/etc/systemd/system/yurthub.service.d", data); err != nil {
 		return err
 	}
 
